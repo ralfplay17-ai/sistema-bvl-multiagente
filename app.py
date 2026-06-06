@@ -1,15 +1,15 @@
 import os
 import sys
-import streamlit as st
-import requests
-import json
 import re
+import json
+import requests
+import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import pandas as pd
-from datetime import datetime
+from datetime import date, timedelta
+import streamlit as st
 
-# Módulo BVL: fuente primaria de datos históricos
+# BVL historical data module (CSV local)
 _BVL_DATA_DIR = os.path.join(os.path.dirname(__file__), "data_bvl")
 if _BVL_DATA_DIR not in sys.path:
     sys.path.insert(0, _BVL_DATA_DIR)
@@ -20,57 +20,228 @@ except Exception:
     _BVL_DISPONIBLE = False
 
 st.set_page_config(
-    page_title="Soporte de decisión — acciones mineras BVL",
-    layout="wide"
+    page_title="Dashboard BVL — Análisis Minero",
+    layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-# -------------------------
-# CONFIG LANGFLOW Y APIs
-# -------------------------
-LANGFLOW_BASE = os.environ.get("LANGFLOW_BASE_URL", "http://localhost:7860")
+# ─────────────────────────────────────────────────────────────────────────────
+# CONFIGURACIÓN
+# ─────────────────────────────────────────────────────────────────────────────
+LANGFLOW_BASE    = os.environ.get("LANGFLOW_BASE_URL", "http://localhost:7860")
 LANGFLOW_API_KEY = os.environ.get("LANGFLOW_API_KEY", "")
-LANGFLOW_USER = os.environ.get("LANGFLOW_USER", "langflow")
-LANGFLOW_PASS = os.environ.get("LANGFLOW_PASS", "langflow")
-ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_KEY", "TPTUYCIWJ2JYRVWQ")
+LANGFLOW_USER    = os.environ.get("LANGFLOW_USER", "langflow")
+LANGFLOW_PASS    = os.environ.get("LANGFLOW_PASS", "langflow")
+AV_KEY           = os.environ.get("ALPHA_VANTAGE_KEY", "TPTUYCIWJ2JYRVWQ")
 
-_lf_token: str | None = None
-_lf_api_key: str | None = None
+BVL_API_BASE = "https://dataondemand.bvl.com.pe/v1"
+BVL_HEADERS  = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Accept":     "application/json, text/plain, */*",
+    "Referer":    "https://www.bvl.com.pe/",
+    "Origin":     "https://www.bvl.com.pe",
+}
+
+TICKERS_BVL = {
+    "BVN — Buenaventura":          "BVN",
+    "SCCO — Southern Copper":       "SCCO",
+    "CVERDEC1 — Cerro Verde":       "CVERDEC1",
+    "MINSURI1 — Minsur":            "MINSURI1",
+    "VOLCABC1 — Volcan":            "VOLCABC1",
+    "NEXAPEC1 — Nexa Resources":    "NEXAPEC1",
+    "BROCALC1 — El Brocal":         "BROCALC1",
+    "SHPC1 — Shougang Hierro":      "SHPC1",
+    "PODERC1 — Poderosa":           "PODERC1",
+    "MOROCOC1 — Morococha":         "MOROCOC1",
+    "LUISAI1 — Santa Luisa":        "LUISAI1",
+    "ATACOBC1 — Atacocha":          "ATACOBC1",
+    "MINCORC1 — Cía Corona":        "MINCORC1",
+    "PERUBAI1 — Perubar":           "PERUBAI1",
+    "FOSPACC1 — Fosfatos Pacífico": "FOSPACC1",
+    "CASTROC1 — Castrovirreyna":    "CASTROC1",
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ESTILOS
+# ─────────────────────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+.block-container { padding-top: 2.8rem; padding-bottom: 1rem; }
+
+/* ── Tabs (Streamlit 1.35+) ───────────────────────────────────────── */
+button[role="tab"] {
+    color: #aaa !important;
+    font-size: 14px !important;
+    font-weight: 600 !important;
+    background: transparent !important;
+    border: none !important;
+    padding: 8px 18px !important;
+}
+button[role="tab"]:hover {
+    color: #fff !important;
+}
+button[role="tab"][aria-selected="true"] {
+    color: #fff !important;
+}
+button[role="tab"] p {
+    color: inherit !important;
+    font-size: 14px !important;
+    font-weight: 600 !important;
+}
+div[role="tablist"] {
+    border-bottom: 1px solid #2a2a2a;
+    gap: 4px;
+}
+
+/* Tarjetas métricas */
+.metric-card {
+    background: #1e1e1e;
+    border: 1px solid #333;
+    border-radius: 12px;
+    padding: 18px 20px;
+    text-align: center;
+}
+.metric-card .label  { color: #888; font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; }
+.metric-card .value  { color: #fff; font-size: 32px; font-weight: 800; margin: 6px 0 4px; line-height: 1; }
+.metric-card .sub    { color: #aaa; font-size: 13px; }
+
+/* Señal principal */
+.signal-banner {
+    border-radius: 14px; padding: 28px 24px; text-align: center; margin-bottom: 4px;
+}
+.signal-banner.buy  { background: #0d2e1a; border: 2px solid #22c55e; }
+.signal-banner.hold { background: #2c2200; border: 2px solid #eab308; }
+.signal-banner.sell { background: #2e0d0d; border: 2px solid #ef4444; }
+.signal-banner .sig-label { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: .1em; margin-bottom: 6px; }
+.signal-banner .sig-main  { font-size: 52px; font-weight: 900; line-height: 1; }
+.signal-banner .sig-sub   { font-size: 16px; margin-top: 8px; opacity: .8; }
+.signal-banner.buy  .sig-main  { color: #22c55e; }
+.signal-banner.hold .sig-main  { color: #eab308; }
+.signal-banner.sell .sig-main  { color: #ef4444; }
+
+/* Tarjeta razones */
+.reason-card {
+    background: #1e1e1e; border: 1px solid #333; border-radius: 12px;
+    padding: 20px 22px; color: #ddd; height: 100%;
+}
+.reason-card h4 { color: #fff; font-size: 15px; font-weight: 700; margin: 0 0 12px; }
+.reason-card li { font-size: 14px; margin-bottom: 7px; line-height: 1.5; }
+
+/* Agentes */
+.agent-card {
+    background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 10px;
+    padding: 14px 16px; margin-bottom: 10px;
+}
+.agent-card .ag-name   { color: #bbb; font-size: 13px; font-weight: 600; margin-bottom: 4px; }
+.agent-card .ag-signal { font-size: 17px; font-weight: 800; }
+.agent-card .ag-signal.buy  { color: #22c55e; }
+.agent-card .ag-signal.hold { color: #eab308; }
+.agent-card .ag-signal.sell { color: #ef4444; }
+.agent-card .ag-conf   { color: #666; font-size: 12px; margin-top: 2px; }
+.agent-card .ag-desc   { color: #999; font-size: 12px; margin-top: 7px; line-height: 1.5; border-top: 1px solid #2a2a2a; padding-top: 7px; }
+
+/* Barra de progreso */
+.prog-wrap { background: #2a2a2a; border-radius: 6px; height: 6px; overflow: hidden; margin-top: 6px; }
+.prog-fill  { height: 6px; border-radius: 6px; }
+.prog-fill.buy  { background: #22c55e; }
+.prog-fill.hold { background: #eab308; }
+.prog-fill.sell { background: #ef4444; }
+
+/* Precio real-time sidebar */
+.rt-price-box {
+    background: #161616; border: 1px solid #2a2a2a; border-radius: 10px;
+    padding: 12px 14px; margin-top: 8px;
+}
+.rt-price-box .rt-ticker { color: #888; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }
+.rt-price-box .rt-val    { color: #fff; font-size: 26px; font-weight: 800; line-height: 1; margin: 4px 0 2px; }
+.rt-price-box .rt-change.up   { color: #22c55e; font-size: 14px; }
+.rt-price-box .rt-change.down { color: #ef4444; font-size: 14px; }
+.rt-price-box .rt-vol  { color: #666; font-size: 11px; margin-top: 4px; }
+
+/* Tarjeta commodity */
+.comm-card {
+    background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 12px;
+    padding: 18px 20px;
+}
+.comm-card .c-name  { color: #888; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; }
+.comm-card .c-price { color: #fff; font-size: 30px; font-weight: 800; margin: 6px 0 2px; }
+.comm-card .c-label { color: #555; font-size: 11px; }
+.comm-card .c-d-up  { color: #22c55e; font-size: 14px; font-weight: 700; }
+.comm-card .c-d-dn  { color: #ef4444; font-size: 14px; font-weight: 700; }
+.comm-card .c-d-eq  { color: #888;    font-size: 14px; font-weight: 700; }
+.comm-card .c-src   { color: #444; font-size: 11px; margin-top: 6px; }
+
+/* Noticias */
+.news-card {
+    background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 10px;
+    padding: 14px 16px; margin-bottom: 10px;
+}
+.news-card .n-title  { color: #e8e8e8; font-size: 14px; font-weight: 600; margin-bottom: 5px; line-height: 1.4; }
+.news-card .n-meta   { color: #555; font-size: 11px; margin-bottom: 7px; }
+.news-card .n-desc   { color: #888; font-size: 12px; line-height: 1.5; }
+.news-card .n-badge  { display: inline-block; padding: 2px 9px; border-radius: 20px; font-size: 11px; font-weight: 700; margin-left: 6px; }
+.n-badge.pos { background: #0d2e1a; color: #22c55e; }
+.n-badge.neu { background: #1f1f00; color: #eab308; }
+.n-badge.neg { background: #2e0d0d; color: #ef4444; }
+
+/* Pesos PSO */
+.peso-bar { background:#1a1a1a; border: 1px solid #2a2a2a; border-radius: 10px; padding: 14px 16px; margin-bottom: 8px; }
+.peso-bar .p-name { color: #999; font-size: 13px; }
+.peso-bar .p-pct  { color: #fff; font-size: 22px; font-weight: 800; float: right; }
+</style>
+""", unsafe_allow_html=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FUNCIONES LANGFLOW
+# ─────────────────────────────────────────────────────────────────────────────
+_lf_token:   str | None = None
 _lf_flow_id: str | None = None
 
 
-def _lf_login() -> str:
-    r = requests.post(
-        f"{LANGFLOW_BASE}/api/v1/login",
-        data={"username": LANGFLOW_USER, "password": LANGFLOW_PASS},
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        timeout=10,
-    )
-    r.raise_for_status()
-    return r.json()["access_token"]
+def _lf_get_token() -> str:
+    """Obtiene token de LangFlow. Prueba auto_login primero, luego credenciales."""
+    global _lf_token
+    if _lf_token:
+        return _lf_token
 
+    # auto_login (requiere LANGFLOW_SKIP_AUTH_AUTO_LOGIN=true en el servidor)
+    try:
+        r = requests.get(f"{LANGFLOW_BASE}/api/v1/auto_login", timeout=10)
+        if r.ok:
+            tok = r.json().get("access_token")
+            if tok:
+                _lf_token = tok
+                return tok
+    except Exception:
+        pass
 
-def _lf_get_key() -> str:
-    """Retorna x-api-key válida: la del env var o crea una via login."""
-    global _lf_token, _lf_api_key
-    if LANGFLOW_API_KEY:
-        return LANGFLOW_API_KEY
-    if _lf_api_key:
-        return _lf_api_key
-    if not _lf_token:
-        _lf_token = _lf_login()
-    r = requests.post(
-        f"{LANGFLOW_BASE}/api/v1/api_key/",
-        json={"name": "streamlit-auto"},
-        headers={"Authorization": f"Bearer {_lf_token}", "Content-Type": "application/json"},
-        timeout=10,
-    )
-    r.raise_for_status()
-    _lf_api_key = r.json()["api_key"]
-    return _lf_api_key
+    # Fallback: login con credenciales
+    for user, pwd in [
+        (LANGFLOW_USER, LANGFLOW_PASS),
+        ("admin", "admin1234"),
+        ("langflow", "langflow"),
+    ]:
+        try:
+            r = requests.post(
+                f"{LANGFLOW_BASE}/api/v1/login",
+                data={"username": user, "password": pwd},
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=10,
+            )
+            if r.ok:
+                tok = r.json().get("access_token")
+                if tok:
+                    _lf_token = tok
+                    return tok
+        except Exception:
+            pass
+
+    raise RuntimeError("No se pudo autenticar con LangFlow")
 
 
 def _lf_auth_headers() -> dict:
-    return {"Content-Type": "application/json", "x-api-key": _lf_get_key()}
+    return {"Content-Type": "application/json", "Authorization": f"Bearer {_lf_get_token()}"}
 
 
 def _lf_get_flow_id() -> str:
@@ -91,1308 +262,941 @@ def _lf_get_flow_id() -> str:
     raise RuntimeError("No se encontró ningún flow en LangFlow")
 
 
-# -------------------------
-# ESTILOS
-# -------------------------
-st.markdown("""
-<style>
-body {
-    background-color: #050505;
-}
-
-.main {
-    background-color: #050505;
-}
-
-.block-container {
-    padding-top: 1.5rem;
-}
-
-.card {
-    background-color: #2c2c2a;
-    border: 1px solid #4a4a47;
-    border-radius: 16px;
-    padding: 24px;
-    color: white;
-    min-height: 130px;
-}
-
-.card-title {
-    color: #bfbfba;
-    font-size: 18px;
-    font-weight: 600;
-}
-
-.metric-big {
-    color: white;
-    font-size: 40px;
-    font-weight: 700;
-    margin-top: 12px;
-}
-
-.metric-small {
-    color: #a9a9a4;
-    font-size: 18px;
-}
-
-.signal-card {
-    background-color: #dff4ed;
-    border: 2px solid #19c39c;
-    border-radius: 18px;
-    padding: 32px;
-    text-align: center;
-    color: #064f43;
-}
-
-.signal-card-yellow {
-    background-color: #fff5df;
-    border: 2px solid #f0a92f;
-    border-radius: 18px;
-    padding: 32px;
-    text-align: center;
-    color: #80500e;
-}
-
-.signal-card-red {
-    background-color: #ffe5e3;
-    border: 2px solid #d94841;
-    border-radius: 18px;
-    padding: 32px;
-    text-align: center;
-    color: #8c1f1a;
-}
-
-.signal-title {
-    font-size: 20px;
-    font-weight: 700;
-}
-
-.signal-main {
-    font-size: 54px;
-    font-weight: 800;
-    margin: 10px 0;
-}
-
-.reason-card {
-    background-color: #2c2c2a;
-    border: 1px solid #4a4a47;
-    border-radius: 16px;
-    padding: 26px;
-    color: white;
-}
-
-.agent-row {
-    display: grid;
-    grid-template-columns: 1.4fr 0.8fr 1fr 0.4fr;
-    align-items: center;
-    gap: 14px;
-    border-bottom: 1px solid #494946;
-    padding: 18px 0;
-    color: white;
-}
-
-.agent-name {
-    font-size: 22px;
-    font-weight: 700;
-}
-
-.badge-buy {
-    background-color: #e8f5dc;
-    color: #356b1f;
-    border-radius: 18px;
-    padding: 8px 18px;
-    font-weight: 700;
-    text-align: center;
-}
-
-.badge-hold {
-    background-color: #fff1dc;
-    color: #80500e;
-    border-radius: 18px;
-    padding: 8px 18px;
-    font-weight: 700;
-    text-align: center;
-}
-
-.badge-sell {
-    background-color: #ffe0df;
-    color: #9c211b;
-    border-radius: 18px;
-    padding: 8px 18px;
-    font-weight: 700;
-    text-align: center;
-}
-
-.progress-bg {
-    background-color: #20201f;
-    height: 8px;
-    border-radius: 10px;
-    overflow: hidden;
-}
-
-.progress-fill {
-    background-color: #5ca22d;
-    height: 8px;
-    border-radius: 10px;
-}
-
-.ticker-button {
-    display: inline-block;
-    border: 1px solid #5b5b58;
-    border-radius: 14px;
-    padding: 10px 24px;
-    margin-right: 10px;
-    color: #c7c7c2;
-    font-weight: 700;
-    background-color: #242422;
-}
-
-.ticker-button-active {
-    display: inline-block;
-    border: 2px solid #4aa3ff;
-    border-radius: 14px;
-    padding: 10px 24px;
-    margin-right: 10px;
-    color: #0b477d;
-    font-weight: 800;
-    background-color: #d9ecff;
-}
-
-.live-badge {
-    float: right;
-    background-color: #e6f5db;
-    color: #2d5d1e;
-    padding: 8px 18px;
-    border-radius: 14px;
-    font-weight: 800;
-}
-
-.tab-button {
-    display: inline-block;
-    border: 2px solid #4a4a47;
-    border-radius: 12px;
-    padding: 12px 28px;
-    margin-right: 10px;
-    color: #c7c7c2;
-    font-weight: 700;
-    background-color: #2c2c2a;
-    cursor: pointer;
-}
-
-.tab-button-active {
-    border: 2px solid #4aa3ff;
-    background-color: #1a3a5f;
-    color: #ffffff;
-}
-</style>
-""", unsafe_allow_html=True)
-
-
-# -------------------------
-# FUNCIONES LANGFLOW
-# -------------------------
-def extraer_json_de_texto(texto: str):
-    """Extrae JSON del texto, manejando diferentes formatos"""
+def _extraer_json(texto: str):
     texto = texto.strip()
-
-    # Intentar parsear directamente
     try:
-        data = json.loads(texto)
-        if isinstance(data, dict):
-            return data
+        d = json.loads(texto)
+        if isinstance(d, dict):
+            return d
     except Exception:
         pass
-
-    # Buscar JSON con regex
     match = re.search(r"\{.*\}", texto, re.DOTALL)
     if match:
         try:
-            data = json.loads(match.group())
-            if isinstance(data, dict):
-                return data
+            d = json.loads(match.group())
+            if isinstance(d, dict):
+                return d
         except Exception:
             pass
-
     return None
 
 
-def extraer_json_de_langflow_response(response_json):
-    """Busca el JSON final dentro de la respuesta de Langflow."""
-    textos_posibles = []
-
+def _extraer_json_de_response(response_json):
+    textos = []
     def recorrer(obj):
         if isinstance(obj, dict):
             for k, v in obj.items():
-                if k in ["text", "content", "message"] and isinstance(v, str):
-                    textos_posibles.append(v)
+                if k in ("text", "content", "message") and isinstance(v, str):
+                    textos.append(v)
                 recorrer(v)
         elif isinstance(obj, list):
             for item in obj:
                 recorrer(item)
-
     recorrer(response_json)
-
-    for texto in textos_posibles:
-        data = extraer_json_de_texto(texto)
+    for texto in textos:
+        data = _extraer_json(texto)
         if data:
             return data
+    raise ValueError("No se encontró JSON en la respuesta de LangFlow.")
 
-    raise ValueError("No se pudo encontrar JSON en la respuesta de Langflow.")
 
-
-def ejecutar_langflow(ticker):
-    """Ejecuta el flujo de Langflow y devuelve el JSON del coordinador"""
+def ejecutar_langflow(ticker: str) -> dict:
     global _lf_token, _lf_flow_id
-
-    # Pre-fetch noticias desde app.py para evitar dependencia del SecretStr en LangFlow
-    noticias_bloque = prefetch_noticias_sentimiento(ticker)
-    input_value = f"Analiza {ticker}"
-    if noticias_bloque:
-        input_value += f"\n\n{noticias_bloque}"
-
-    payload = {
-        "output_type": "chat",
-        "input_type": "chat",
-        "input_value": input_value,
-    }
+    payload = {"output_type": "chat", "input_type": "chat", "input_value": f"Analiza {ticker}"}
 
     def _run():
         flow_id = _lf_get_flow_id()
-        url = f"{LANGFLOW_BASE}/api/v1/run/{flow_id}"
-        return requests.post(url, json=payload, headers=_lf_auth_headers(), timeout=240)
-
-    response = _run()
-
-    # Si el token expiró, refrescamos y reintentamos una vez
-    if response.status_code in (401, 403) and not LANGFLOW_API_KEY:
-        _lf_token = None
-        _lf_flow_id = None
-        response = _run()
-
-    response.raise_for_status()
-    return extraer_json_de_langflow_response(response.json())
-
-
-def _cargar_df_backtest(ticker, dias):
-    """Carga datos históricos: BVL primero, Alpha Vantage como fallback."""
-    if _BVL_DISPONIBLE:
-        df = obtener_df_para_backtest(ticker, dias)
-        if df is not None and len(df) >= 20:
-            print(f"[BVL] Backtest {ticker}: {len(df)} días desde BVL")
-            return df, None
-
-    # Fallback Alpha Vantage
-    import time
-    time.sleep(15)
-    url = (
-        f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY"
-        f"&symbol={ticker}&outputsize=compact&apikey={ALPHA_VANTAGE_KEY}"
-    )
-    response = requests.get(url, timeout=20)
-    data = response.json()
-    if "Time Series (Daily)" not in data:
-        error_msg = "No se pudieron obtener datos históricos"
-        if "Note" in data:
-            error_msg = "Rate limit alcanzado — espera 1 minuto"
-        elif "Error Message" in data:
-            error_msg = f"Error API: {data['Error Message']}"
-        return None, error_msg
-
-    ts = data["Time Series (Daily)"]
-    df = pd.DataFrame.from_dict(ts, orient="index")
-    df.columns = ["Open", "High", "Low", "Close", "Volume"]
-    df = df.astype(float)
-    df.index = pd.to_datetime(df.index)
-    df = df.sort_index().tail(dias)
-    return df, None
-
-
-def ejecutar_backtest(ticker, dias):
-    """Ejecuta el backtesting con datos de BVL (fallback: Alpha Vantage)"""
-    try:
-        df, error = _cargar_df_backtest(ticker, dias)
-        if error:
-            return {"error": error}
-        if df is None:
-            return {"error": "No se pudieron obtener datos históricos"}
-
-        if len(df) < 20:
-            return {"error": "Datos insuficientes para backtesting"}
-
-        # Calcular indicadores
-        def calcular_rsi(precios, periodo=14):
-            delta = precios.diff()
-            ganancia = delta.where(delta > 0, 0).rolling(window=periodo).mean()
-            perdida = -delta.where(delta < 0, 0).rolling(window=periodo).mean()
-            rs = ganancia / perdida
-            return 100 - (100 / (1 + rs))
-
-        df['RSI'] = calcular_rsi(df['Close'])
-        ema12 = df['Close'].ewm(span=12, adjust=False).mean()
-        ema26 = df['Close'].ewm(span=26, adjust=False).mean()
-        df['MACD'] = ema12 - ema26
-        df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
-        df['MACD_Hist'] = df['MACD'] - df['Signal']
-        df['SMA20'] = df['Close'].rolling(window=20).mean()
-        df['SMA50'] = df['Close'].rolling(window=50).mean()
-
-        # Generar señales
-        def generar_senal(row):
-            if pd.isna(row['RSI']) or pd.isna(row['SMA20']) or pd.isna(row['SMA50']):
-                return 'MANTENER'
-            
-            indicadores_alcistas = 0
-            indicadores_bajistas = 0
-            
-            if row['RSI'] < 30:
-                indicadores_alcistas += 1
-            elif row['RSI'] > 70:
-                indicadores_bajistas += 1
-            
-            if row['MACD_Hist'] > 0:
-                indicadores_alcistas += 1
-            elif row['MACD_Hist'] < 0:
-                indicadores_bajistas += 1
-            
-            if row['SMA20'] > row['SMA50']:
-                indicadores_alcistas += 1
-            elif row['SMA20'] < row['SMA50']:
-                indicadores_bajistas += 1
-            
-            if indicadores_alcistas > indicadores_bajistas:
-                return 'COMPRAR'
-            elif indicadores_bajistas > indicadores_alcistas:
-                return 'VENDER'
-            else:
-                return 'MANTENER'
-
-        df['Senal'] = df.apply(generar_senal, axis=1)
-
-        # Simular estrategia PSO
-        posicion = 0
-        capital_inicial = 10000
-        capital = capital_inicial
-        operaciones = []
-        historial_capital = []
-
-        for i in range(len(df)):
-            row = df.iloc[i]
-            precio = row['Close']
-            senal = row['Senal']
-            fecha = df.index[i]
-
-            if senal == 'COMPRAR' and posicion == 0:
-                posicion = capital / precio
-                capital = 0
-                operaciones.append({
-                    'fecha': fecha.strftime('%Y-%m-%d'),
-                    'tipo': 'COMPRA',
-                    'precio': float(precio)
-                })
-            elif senal == 'VENDER' and posicion > 0:
-                capital = posicion * precio
-                operaciones.append({
-                    'fecha': fecha.strftime('%Y-%m-%d'),
-                    'tipo': 'VENTA',
-                    'precio': float(precio),
-                    'ganancia': float(capital - capital_inicial)
-                })
-                posicion = 0
-
-            if posicion > 0:
-                capital_actual = posicion * precio
-            else:
-                capital_actual = capital
-            
-            historial_capital.append({
-                'fecha': fecha.strftime('%Y-%m-%d'),
-                'capital': float(capital_actual)
-            })
-
-        if posicion > 0:
-            capital = posicion * df['Close'].iloc[-1]
-
-        # Calcular métricas
-        capital_final_pso = historial_capital[-1]['capital']
-        retorno_total_pso = (capital_final_pso - capital_inicial) / capital_inicial * 100
-
-        capitales = [h['capital'] for h in historial_capital]
-        retornos_diarios = pd.Series(capitales).pct_change().dropna()
-        
-        if len(retornos_diarios) > 0 and retornos_diarios.std() != 0:
-            sharpe_ratio = (retornos_diarios.mean() / retornos_diarios.std()) * (252 ** 0.5)
-        else:
-            sharpe_ratio = 0
-
-        capital_series = pd.Series(capitales)
-        cummax = capital_series.cummax()
-        drawdown = (capital_series - cummax) / cummax
-        max_drawdown = drawdown.min() * 100
-
-        operaciones_cerradas = [op for op in operaciones if 'ganancia' in op]
-        if len(operaciones_cerradas) > 0:
-            ganadoras = len([op for op in operaciones_cerradas if op['ganancia'] > 0])
-            win_rate = (ganadoras / len(operaciones_cerradas)) * 100
-        else:
-            win_rate = 0
-
-        # Buy & Hold
-        precio_inicial = df['Close'].iloc[0]
-        precio_final = df['Close'].iloc[-1]
-        retorno_buy_hold = (precio_final - precio_inicial) / precio_inicial * 100
-        capital_final_bh = capital_inicial * (1 + retorno_buy_hold / 100)
-
-        # Historial Buy & Hold
-        historial_bh = []
-        for i in range(len(df)):
-            precio = df['Close'].iloc[i]
-            capital_bh = capital_inicial * (precio / precio_inicial)
-            historial_bh.append({
-                'fecha': df.index[i].strftime('%Y-%m-%d'),
-                'capital': float(capital_bh)
-            })
-
-        resultado = {
-            "ticker": ticker,
-            "periodo": {
-                "inicio": df.index[0].strftime('%Y-%m-%d'),
-                "fin": df.index[-1].strftime('%Y-%m-%d'),
-                "dias": len(df)
-            },
-            "estrategia_pso": {
-                "capital_inicial": capital_inicial,
-                "capital_final": float(capital_final_pso),
-                "retorno_total": float(retorno_total_pso),
-                "sharpe_ratio": float(sharpe_ratio),
-                "max_drawdown": float(max_drawdown),
-                "win_rate": float(win_rate),
-                "num_operaciones": len(operaciones_cerradas),
-                "historial_capital": historial_capital
-            },
-            "buy_hold": {
-                "capital_inicial": capital_inicial,
-                "capital_final": float(capital_final_bh),
-                "retorno_total": float(retorno_buy_hold),
-                "historial_capital": historial_bh
-            },
-            "comparacion": {
-                "diferencia_retorno": float(retorno_total_pso - retorno_buy_hold),
-                "ganador": "PSO" if capital_final_pso > capital_final_bh else "Buy & Hold"
-            },
-            "operaciones": operaciones
-        }
-
-        return resultado
-
-    except Exception as e:
-        return {"error": f"Error en backtesting: {str(e)}"}
-
-
-# -------------------------
-# PRE-FETCH DE NOTICIAS (evita depender del SecretStr en LangFlow)
-# -------------------------
-def prefetch_noticias_sentimiento(ticker: str) -> str:
-    """Obtiene noticias AV y devuelve un bloque de texto listo para inyectar al input de LangFlow."""
-    cache_key = f"_noticias_{ticker}"
-    if cache_key in st.session_state and st.session_state[cache_key]:
-        return st.session_state[cache_key]
-
-    if not ALPHA_VANTAGE_KEY:
-        return ""
-
-    primary = ticker.upper()
-    secondary = "BVN" if primary == "SCCO" else "SCCO"
-
-    def fetch_single(t):
-        try:
-            url = (f"https://www.alphavantage.co/query?function=NEWS_SENTIMENT"
-                   f"&tickers={t}&limit=15&apikey={ALPHA_VANTAGE_KEY}")
-            resp = requests.get(url, timeout=15).json()
-            if resp.get("Information") or resp.get("Note"):
-                return []
-            feed = resp.get("feed", [])
-            relevant = []
-            for art in feed:
-                for ts in art.get("ticker_sentiment", []):
-                    if ts.get("ticker") == t and float(ts.get("relevance_score", 0)) >= 0.05:
-                        art2 = dict(art)
-                        art2["_ts"] = float(ts.get("ticker_sentiment_score", 0))
-                        relevant.append(art2)
-                        break
-            return relevant if relevant else feed
-        except Exception:
-            return []
-
-    articles = fetch_single(primary)
-    if not articles:
-        articles = fetch_single(secondary)
-        if articles:
-            primary = secondary
-
-    if not articles:
-        return ""
-
-    alcistas = bajistas = neutros = 0
-    lineas = []
-    for i, art in enumerate(articles[:8], 1):
-        titulo = art.get("title", "Sin titulo")
-        fecha = art.get("time_published", "")[:8]
-        if len(fecha) == 8:
-            fecha = f"{fecha[:4]}-{fecha[4:6]}-{fecha[6:8]}"
-        label = art.get("overall_sentiment_label", "Neutral")
-        score = float(art.get("overall_sentiment_score", 0))
-        ts_score = art.get("_ts", score)
-        resumen = art.get("summary", "")[:180]
-        if score > 0.15:
-            alcistas += 1
-        elif score < -0.15:
-            bajistas += 1
-        else:
-            neutros += 1
-        lineas.append(
-            f"[{i}] {titulo}\n"
-            f"    Fecha:{fecha} | Sentimiento:{label}({score:+.3f}) | Ticker:{ts_score:+.3f}\n"
-            f"    {resumen}"
+        return requests.post(
+            f"{LANGFLOW_BASE}/api/v1/run/{flow_id}",
+            json=payload, headers=_lf_auth_headers(), timeout=240,
         )
 
-    total = alcistas + bajistas + neutros
-    tendencia = "ALCISTA" if alcistas > bajistas else ("BAJISTA" if bajistas > alcistas else "NEUTRAL")
-    bloque = (
-        f"[NOTICIAS_PREFETCH ticker={primary}]\n"
-        f"Total:{total} | Alcistas:{alcistas} | Bajistas:{bajistas} | Neutras:{neutros}\n"
-        f"Tendencia:{tendencia}\n\n" + "\n\n".join(lineas)
-    )
-    st.session_state[cache_key] = bloque
-    return bloque
+    resp = _run()
+    if resp.status_code in (401, 403):
+        _lf_token = None   # forzar re-autenticación
+        _lf_flow_id = None
+        resp = _run()
+    resp.raise_for_status()
+    return _extraer_json_de_response(resp.json())
 
 
-# -------------------------
-# FUNCIÓN PARA OBTENER HISTÓRICOS
-# -------------------------
-def _calcular_indicadores_historico(df_close):
-    """Calcula RSI, MACD, SMA20, SMA50 sobre una Serie de precios de cierre."""
-    def _rsi(p, n=14):
-        d = p.diff()
-        g = d.where(d > 0, 0).rolling(n).mean()
-        l = -d.where(d < 0, 0).rolling(n).mean()
-        return 100 - (100 / (1 + g / l))
+# ─────────────────────────────────────────────────────────────────────────────
+# DATOS EN TIEMPO REAL — BVL (precio, variación, volumen)
+# ─────────────────────────────────────────────────────────────────────────────
+@st.cache_data(ttl=60, show_spinner=False)
+def _fetch_bvl_precio_rt(nemonico: str) -> dict | None:
+    try:
+        r = requests.get(BVL_API_BASE + "/issuers", headers=BVL_HEADERS, timeout=10)
+        r.raise_for_status()
+        company_code = None
+        for issuer in r.json():
+            if issuer.get("tkrCode") == nemonico and issuer.get("active", True):
+                company_code = issuer.get("companyCode")
+                break
+        if not company_code:
+            return None
+        r2 = requests.get(BVL_API_BASE + "/issuers/" + company_code + "/value", headers=BVL_HEADERS, timeout=10)
+        r2.raise_for_status()
+        def _f(v):
+            try: return float(v) if v not in (None, "", "-", "0") else None
+            except: return None
+        def _i(v):
+            try: return int(float(v)) if v not in (None, "", "-") else None
+            except: return None
+        for emisor in r2.json():
+            for lv in emisor.get("listLastValue", []):
+                if lv.get("tkrCode") == nemonico:
+                    return {
+                        "precio":       _f(lv.get("close") or lv.get("last")),
+                        "variacion_pct": _f(lv.get("var")),
+                        "volumen":      _i(lv.get("quantityNegotiated")),
+                        "moneda":       (lv.get("coin") or "S/.").strip(),
+                        "nombre":       lv.get("companyName", nemonico),
+                    }
+    except Exception:
+        return None
+    return None
 
-    rsi    = _rsi(df_close)
-    ema12  = df_close.ewm(span=12, adjust=False).mean()
-    ema26  = df_close.ewm(span=26, adjust=False).mean()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# COMMODITIES — yfinance (fallback: Twelve Data / Alpha Vantage)
+# ─────────────────────────────────────────────────────────────────────────────
+@st.cache_data(ttl=300, show_spinner=False)
+def _fetch_commodities() -> dict:
+    result = {}
+    metals = [
+        ("Oro",   "GC=F", "XAU/USD", "oz"),
+        ("Plata", "SI=F", "XAG/USD", "oz"),
+        ("Cobre", "HG=F", "HG=F",    "lb"),
+    ]
+    for nombre, symbol, label, unit in metals:
+        try:
+            import yfinance as yf
+            hist = yf.Ticker(symbol).history(period="15d")
+            if hist.empty or len(hist) < 2:
+                result[nombre] = {"error": "Sin datos"}
+                continue
+            closes = hist["Close"].dropna()
+            ph = float(closes.iloc[-1])
+            pa = float(closes.iloc[-2])
+            p5 = float(closes.iloc[-5]) if len(closes) >= 5 else float(closes.iloc[0])
+            result[nombre] = {
+                "label":     label,
+                "unit":      unit,
+                "precio":    ph,
+                "cambio_dia": (ph - pa) / pa * 100,
+                "tend_5d":   (ph - p5) / p5 * 100,
+                "closes":    [round(c, 2) for c in closes.tolist()],
+                "dates":     [d.strftime("%d/%m") for d in closes.index],
+                "fuente":    "yfinance",
+            }
+        except Exception as e:
+            result[nombre] = {"error": str(e)}
+    return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NOTICIAS — Alpha Vantage + Google News RSS
+# ─────────────────────────────────────────────────────────────────────────────
+@st.cache_data(ttl=600, show_spinner=False)
+def _fetch_noticias(ticker: str) -> dict:
+    out = {"av": [], "rss": [], "ticker": ticker}
+
+    # Alpha Vantage
+    if AV_KEY:
+        try:
+            url = (f"https://www.alphavantage.co/query?function=NEWS_SENTIMENT"
+                   f"&tickers={ticker}&limit=15&apikey={AV_KEY}")
+            resp = requests.get(url, timeout=15).json()
+            if not resp.get("Information") and not resp.get("Note"):
+                for art in resp.get("feed", []):
+                    for ts in art.get("ticker_sentiment", []):
+                        if ts.get("ticker") == ticker and float(ts.get("relevance_score", 0)) >= 0.05:
+                            fd = art.get("time_published", "")[:8]
+                            if len(fd) == 8:
+                                fd = f"{fd[:4]}-{fd[4:6]}-{fd[6:8]}"
+                            out["av"].append({
+                                "titulo":  art.get("title", ""),
+                                "fecha":   fd,
+                                "fuente":  art.get("source", ""),
+                                "score":   float(art.get("overall_sentiment_score", 0)),
+                                "label":   art.get("overall_sentiment_label", "Neutral"),
+                                "resumen": art.get("summary", "")[:220],
+                                "url":     art.get("url", ""),
+                            })
+                            break
+        except Exception:
+            pass
+
+    # Google News RSS
+    try:
+        import feedparser
+        q = requests.utils.quote(f"{ticker} Peru minera bolsa Lima")
+        feed = feedparser.parse(
+            f"https://news.google.com/rss/search?q={q}&hl=es-419&gl=PE&ceid=PE:es-419"
+        )
+        for entry in (feed.entries or [])[:8]:
+            resumen = re.sub(r"<[^>]+>", "", entry.get("summary", ""))[:220]
+            out["rss"].append({
+                "titulo":    entry.get("title", ""),
+                "publicado": entry.get("published", ""),
+                "link":      entry.get("link", ""),
+                "resumen":   resumen,
+            })
+    except Exception:
+        pass
+
+    return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DATOS HISTÓRICOS + INDICADORES
+# ─────────────────────────────────────────────────────────────────────────────
+def _wilder_rsi(close: pd.Series, periodo: int = 14) -> pd.Series:
+    """RSI con suavizado Wilder (EMA alpha=1/periodo). Filtra días sin negociación."""
+    p = close[close > 0].dropna()
+    if len(p) < periodo + 2:
+        return pd.Series([float("nan")] * len(close), index=close.index)
+    delta    = p.diff()
+    avg_gain = delta.clip(lower=0).ewm(alpha=1.0 / periodo, min_periods=periodo, adjust=False).mean()
+    avg_loss = (-delta.clip(upper=0)).ewm(alpha=1.0 / periodo, min_periods=periodo, adjust=False).mean()
+    rs       = avg_gain / avg_loss.replace(0, float("inf"))
+    return (100 - (100 / (1 + rs))).clip(0, 100).reindex(close.index)
+
+
+def _calcular_indicadores(close: pd.Series) -> list[dict]:
+    # Filtrar días sin negociación (precio 0 o repetido)
+    close = close[close > 0].dropna()
+
+    rsi    = _wilder_rsi(close)
+    ema12  = close.ewm(span=12, adjust=False).mean()
+    ema26  = close.ewm(span=26, adjust=False).mean()
     macd   = ema12 - ema26
     signal = macd.ewm(span=9, adjust=False).mean()
-    sma20  = df_close.rolling(20).mean()
-    sma50  = df_close.rolling(50).mean() if len(df_close) >= 50 else None
+    sma20  = close.rolling(20).mean()
+    sma50  = close.rolling(50).mean() if len(close) >= 50 else None
 
-    result = []
-    for date, close in df_close.items():
-        def _v(s):
-            if s is None or date not in s.index:
+    rows = []
+    for dt, precio in close.items():
+        def _v(s, _dt=dt):
+            if s is None or _dt not in s.index:
                 return None
-            v = s.loc[date]
+            v = s.loc[_dt]
             return None if pd.isna(v) else float(v)
-        result.append({
-            "fecha":  date.strftime("%Y-%m-%d"),
-            "close":  float(close),
+        rows.append({
+            "fecha":  dt.strftime("%Y-%m-%d"),
+            "close":  float(precio),
             "rsi":    _v(rsi),
             "macd":   _v(macd),
             "signal": _v(signal),
             "sma20":  _v(sma20),
             "sma50":  _v(sma50),
         })
-    return result
+    return rows
 
 
-def obtener_historico_directo(ticker):
-    """Obtiene datos históricos: BVL CSV primero, Alpha Vantage como fallback.
-    Cachea en session_state para evitar múltiples llamadas a la API en la misma sesión."""
-    cache_key = f"_historico_{ticker}"
-    if cache_key in st.session_state and st.session_state[cache_key]:
-        return st.session_state[cache_key]
-
-    historico = None
-
-    # Fuente primaria: BVL CSV local
+@st.cache_data(ttl=300, show_spinner=False)
+def _fetch_historico(ticker: str) -> list[dict] | None:
     if _BVL_DISPONIBLE:
         try:
-            historico = obtener_historico_para_grafico(ticker, dias=60)
-            if historico:
-                print(f"[BVL] Histórico gráfico {ticker}: {len(historico)} días desde BVL")
-        except Exception as e:
-            print(f"[BVL] Error gráfico: {e}")
-
-    # Fallback: Alpha Vantage TIME_SERIES_DAILY
-    if not historico:
-        if not ALPHA_VANTAGE_KEY:
-            print("[AV] ALPHA_VANTAGE_KEY no configurada, no se puede obtener histórico")
-            return None
+            h = obtener_historico_para_grafico(ticker, dias=60)
+            if h and len(h) >= 20:
+                return h
+        except Exception:
+            pass
+    # Fallback: BVL API directa
+    try:
+        fecha_fin = date.today()
+        fecha_ini = fecha_fin - timedelta(days=120)
+        r = requests.get(
+            BVL_API_BASE + "/stock-quote/share-value",
+            headers=BVL_HEADERS,
+            params={"name": ticker, "startDate": fecha_ini.isoformat(), "endDate": fecha_fin.isoformat()},
+            timeout=15,
+        )
+        r.raise_for_status()
+        values = r.json().get("values", [])
+        if len(values) >= 20:
+            s = pd.Series(
+                [float(v[1]) for v in values],
+                index=pd.to_datetime([v[0] for v in values]),
+            ).sort_index()
+            s = s[s > 0].dropna()
+            if len(s) >= 15:
+                return _calcular_indicadores(s)
+    except Exception:
+        pass
+    # Fallback: Alpha Vantage
+    if AV_KEY:
         try:
-            url = (
+            r = requests.get(
                 f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY"
-                f"&symbol={ticker}&outputsize=compact&apikey={ALPHA_VANTAGE_KEY}"
+                f"&symbol={ticker}&outputsize=compact&apikey={AV_KEY}",
+                timeout=20,
             )
-            response = requests.get(url, timeout=20)
-            resp_data = response.json()
-
-            if "Time Series (Daily)" not in resp_data:
-                msg = resp_data.get("Note") or resp_data.get("Information") or "sin datos"
-                print(f"[AV] TIME_SERIES_DAILY {ticker}: {msg}")
-                return None
-
-            ts = resp_data["Time Series (Daily)"]
-            df = pd.DataFrame.from_dict(ts, orient="index").astype(float)
-            df.columns = ["Open", "High", "Low", "Close", "Volume"]
-            df.index = pd.to_datetime(df.index)
-            df = df.sort_index().tail(60)
-            historico = _calcular_indicadores_historico(df["Close"])
-            print(f"[AV] Histórico {ticker}: {len(historico)} días desde Alpha Vantage")
-        except Exception as e:
-            print(f"[AV] Error obteniendo histórico {ticker}: {e}")
-            return None
-
-    if historico:
-        st.session_state[cache_key] = historico
-    return historico
+            ts = r.json().get("Time Series (Daily)", {})
+            if ts:
+                df = pd.DataFrame.from_dict(ts, orient="index").astype(float)
+                df.columns = ["Open", "High", "Low", "Close", "Volume"]
+                df.index = pd.to_datetime(df.index)
+                df = df.sort_index().tail(60)
+                return _calcular_indicadores(df["Close"])
+        except Exception:
+            pass
+    return None
 
 
-# -------------------------
-# FUNCIONES GRÁFICOS
-# -------------------------
-def crear_grafico_precio_indicadores(historico_data, ticker):
-    """Crea gráfico con precio, RSI, MACD y SMAs"""
-    if not historico_data or len(historico_data) == 0:
-        return None
-    
-    df = pd.DataFrame(historico_data)
-    df['fecha'] = pd.to_datetime(df['fecha'])
-    
-    # Crear subplots
+# ─────────────────────────────────────────────────────────────────────────────
+# GRÁFICOS
+# ─────────────────────────────────────────────────────────────────────────────
+def _grafico_tecnico(historico: list[dict], ticker: str) -> go.Figure:
+    df = pd.DataFrame(historico)
+    df["fecha"] = pd.to_datetime(df["fecha"])
+
     fig = make_subplots(
         rows=3, cols=1,
         shared_xaxes=True,
-        vertical_spacing=0.05,
-        row_heights=[0.5, 0.25, 0.25],
-        subplot_titles=(f'{ticker} - Precio y Medias Móviles', 'RSI (14)', 'MACD')
+        vertical_spacing=0.04,
+        row_heights=[0.55, 0.22, 0.23],
+        subplot_titles=[f"{ticker} — Precio y Medias Móviles", "RSI (14)", "MACD"],
     )
-    
-    # Gráfico 1: Precio y SMAs
-    fig.add_trace(
-        go.Scatter(x=df['fecha'], y=df['close'], name='Precio', line=dict(color='#4aa3ff', width=2)),
-        row=1, col=1
-    )
-    
-    if 'sma20' in df.columns:
-        fig.add_trace(
-            go.Scatter(x=df['fecha'], y=df['sma20'], name='SMA20', line=dict(color='#f0a92f', width=1.5)),
-            row=1, col=1
-        )
-    
-    if 'sma50' in df.columns:
-        fig.add_trace(
-            go.Scatter(x=df['fecha'], y=df['sma50'], name='SMA50', line=dict(color='#d94841', width=1.5)),
-            row=1, col=1
-        )
-    
-    # Gráfico 2: RSI
-    if 'rsi' in df.columns:
-        fig.add_trace(
-            go.Scatter(x=df['fecha'], y=df['rsi'], name='RSI', line=dict(color='#19c39c', width=2)),
-            row=2, col=1
-        )
-        fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
-        fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
-    
-    # Gráfico 3: MACD
-    if 'macd' in df.columns and 'signal' in df.columns:
-        fig.add_trace(
-            go.Scatter(x=df['fecha'], y=df['macd'], name='MACD', line=dict(color='#4aa3ff', width=2)),
-            row=3, col=1
-        )
-        fig.add_trace(
-            go.Scatter(x=df['fecha'], y=df['signal'], name='Signal', line=dict(color='#f0a92f', width=2)),
-            row=3, col=1
-        )
-    
-    # Layout
+
+    # Precio
+    fig.add_trace(go.Scatter(x=df["fecha"], y=df["close"], name="Precio",
+                             line=dict(color="#60a5fa", width=2.5)), row=1, col=1)
+    if "sma20" in df:
+        fig.add_trace(go.Scatter(x=df["fecha"], y=df["sma20"], name="SMA 20",
+                                 line=dict(color="#fbbf24", width=1.5, dash="dot")), row=1, col=1)
+    if "sma50" in df:
+        fig.add_trace(go.Scatter(x=df["fecha"], y=df["sma50"], name="SMA 50",
+                                 line=dict(color="#f87171", width=1.5, dash="dot")), row=1, col=1)
+
+    # RSI
+    if "rsi" in df:
+        fig.add_trace(go.Scatter(x=df["fecha"], y=df["rsi"], name="RSI",
+                                 line=dict(color="#34d399", width=2)), row=2, col=1)
+        fig.add_hline(y=70, line=dict(color="#ef4444", width=1, dash="dash"), row=2, col=1)
+        fig.add_hline(y=30, line=dict(color="#22c55e", width=1, dash="dash"), row=2, col=1)
+        fig.add_hrect(y0=70, y1=100, fillcolor="#ef4444", opacity=0.06, line_width=0, row=2, col=1)
+        fig.add_hrect(y0=0,  y1=30,  fillcolor="#22c55e", opacity=0.06, line_width=0, row=2, col=1)
+
+    # MACD
+    if "macd" in df and "signal" in df:
+        df["hist"] = df["macd"] - df["signal"]
+        colors = ["#22c55e" if v >= 0 else "#ef4444" for v in df["hist"].fillna(0)]
+        fig.add_trace(go.Bar(x=df["fecha"], y=df["hist"], name="Histograma",
+                             marker_color=colors, opacity=0.6), row=3, col=1)
+        fig.add_trace(go.Scatter(x=df["fecha"], y=df["macd"], name="MACD",
+                                 line=dict(color="#60a5fa", width=2)), row=3, col=1)
+        fig.add_trace(go.Scatter(x=df["fecha"], y=df["signal"], name="Señal",
+                                 line=dict(color="#fbbf24", width=2)), row=3, col=1)
+
     fig.update_layout(
-        height=800,
-        showlegend=True,
-        hovermode='x unified',
-        plot_bgcolor='#1a1a1a',
-        paper_bgcolor='#2c2c2a',
-        font=dict(color='white'),
-        xaxis3_rangeslider_visible=False
+        height=680, hovermode="x unified",
+        plot_bgcolor="#111", paper_bgcolor="#111",
+        font=dict(color="#ccc", size=12),
+        legend=dict(orientation="h", y=1.02, bgcolor="rgba(0,0,0,0)"),
+        margin=dict(l=8, r=8, t=42, b=8),
     )
-    
-    fig.update_xaxes(showgrid=False, gridcolor='#3a3a3a')
-    fig.update_yaxes(showgrid=True, gridcolor='#3a3a3a')
-    
+    fig.update_xaxes(showgrid=True, gridcolor="#222", zeroline=False)
+    fig.update_yaxes(showgrid=True, gridcolor="#222", zeroline=False)
     return fig
 
 
-def crear_grafico_backtest(data_backtest):
-    """Crea gráfico comparativo de curvas de capital"""
-    if not data_backtest or "error" in data_backtest:
-        return None
-    
-    pso_hist = data_backtest['estrategia_pso']['historial_capital']
-    bh_hist = data_backtest['buy_hold']['historial_capital']
-    
-    df_pso = pd.DataFrame(pso_hist)
-    df_bh = pd.DataFrame(bh_hist)
-    
-    df_pso['fecha'] = pd.to_datetime(df_pso['fecha'])
-    df_bh['fecha'] = pd.to_datetime(df_bh['fecha'])
-    
+def _grafico_sparkline(closes: list, dates: list, color: str = "#60a5fa") -> go.Figure:
     fig = go.Figure()
-    
-    # Curva PSO
     fig.add_trace(go.Scatter(
-        x=df_pso['fecha'],
-        y=df_pso['capital'],
-        name='Estrategia PSO',
-        line=dict(color='#4aa3ff', width=3)
+        x=dates, y=closes,
+        line=dict(color=color, width=1.5),
+        fill="tozeroy", fillcolor=color.replace(")", ", 0.10)").replace("rgb", "rgba"),
+        mode="lines",
     ))
-    
-    # Curva Buy & Hold
-    fig.add_trace(go.Scatter(
-        x=df_bh['fecha'],
-        y=df_bh['capital'],
-        name='Buy & Hold',
-        line=dict(color='#f0a92f', width=3)
-    ))
-    
     fig.update_layout(
-        title="Evolución del Capital: PSO vs Buy & Hold",
-        xaxis_title="Fecha",
-        yaxis_title="Capital ($)",
-        height=500,
-        plot_bgcolor='#1a1a1a',
-        paper_bgcolor='#2c2c2a',
-        font=dict(color='white'),
-        hovermode='x unified'
+        height=70, margin=dict(l=0, r=0, t=0, b=0),
+        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+        showlegend=False, xaxis=dict(visible=False), yaxis=dict(visible=False),
     )
-    
-    fig.update_xaxes(showgrid=True, gridcolor='#3a3a3a')
-    fig.update_yaxes(showgrid=True, gridcolor='#3a3a3a')
-    
     return fig
 
 
-# -------------------------
-# FUNCIONES UI
-# -------------------------
-def badge_class(senal):
-    senal = str(senal).upper()
-    if senal == "COMPRAR":
-        return "badge-buy"
-    if senal == "VENDER":
-        return "badge-sell"
-    return "badge-hold"
+def _grafico_backtest(bt: dict) -> go.Figure:
+    df_pso = pd.DataFrame(bt["estrategia_pso"]["historial_capital"])
+    df_bh  = pd.DataFrame(bt["buy_hold"]["historial_capital"])
+    df_pso["fecha"] = pd.to_datetime(df_pso["fecha"])
+    df_bh["fecha"]  = pd.to_datetime(df_bh["fecha"])
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=df_pso["fecha"], y=df_pso["capital"],
+                             name="Estrategia PSO", line=dict(color="#60a5fa", width=3)))
+    fig.add_trace(go.Scatter(x=df_bh["fecha"],  y=df_bh["capital"],
+                             name="Buy & Hold",  line=dict(color="#fbbf24", width=3)))
+    fig.update_layout(
+        height=440, title="Evolución del Capital: PSO vs Buy & Hold",
+        plot_bgcolor="#111", paper_bgcolor="#111",
+        font=dict(color="#ccc"), hovermode="x unified",
+        legend=dict(orientation="h", y=1.06, bgcolor="rgba(0,0,0,0)"),
+        margin=dict(l=8, r=8, t=44, b=8),
+    )
+    fig.update_xaxes(showgrid=True, gridcolor="#222")
+    fig.update_yaxes(showgrid=True, gridcolor="#222", tickprefix="$")
+    return fig
 
 
-def pct(value):
+# ─────────────────────────────────────────────────────────────────────────────
+# BACKTESTING
+# ─────────────────────────────────────────────────────────────────────────────
+def _ejecutar_backtest(ticker: str, dias: int) -> dict:
     try:
-        return int(round(float(value) * 100))
-    except Exception:
-        return 0
+        df, error = None, None
+        if _BVL_DISPONIBLE:
+            df = obtener_df_para_backtest(ticker, dias)
+        if df is None or len(df) < 20:
+            # Fallback Alpha Vantage
+            url = (f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY"
+                   f"&symbol={ticker}&outputsize=full&apikey={AV_KEY}")
+            resp = requests.get(url, timeout=25).json()
+            if "Time Series (Daily)" not in resp:
+                return {"error": resp.get("Note") or resp.get("Information") or "Sin datos históricos"}
+            ts = resp["Time Series (Daily)"]
+            df = pd.DataFrame.from_dict(ts, orient="index").astype(float)
+            df.columns = ["Open", "High", "Low", "Close", "Volume"]
+            df.index = pd.to_datetime(df.index)
+            df = df.sort_index().tail(dias)
+
+        if len(df) < 20:
+            return {"error": "Datos insuficientes para backtesting"}
+
+        df["RSI"]      = _wilder_rsi(df["Close"])
+        ema12          = df["Close"].ewm(span=12, adjust=False).mean()
+        ema26          = df["Close"].ewm(span=26, adjust=False).mean()
+        df["MACD"]     = ema12 - ema26
+        df["Signal"]   = df["MACD"].ewm(span=9, adjust=False).mean()
+        df["MACD_H"]   = df["MACD"] - df["Signal"]
+        df["SMA20"]    = df["Close"].rolling(20).mean()
+        df["SMA50"]    = df["Close"].rolling(50).mean()
+
+        def _senal(row):
+            if pd.isna(row["RSI"]) or pd.isna(row["SMA20"]) or pd.isna(row["SMA50"]):
+                return "MANTENER"
+            alc = baj = 0
+            if row["RSI"] < 30: alc += 1
+            elif row["RSI"] > 70: baj += 1
+            if row["MACD_H"] > 0: alc += 1
+            elif row["MACD_H"] < 0: baj += 1
+            if row["SMA20"] > row["SMA50"]: alc += 1
+            elif row["SMA20"] < row["SMA50"]: baj += 1
+            return "COMPRAR" if alc > baj else ("VENDER" if baj > alc else "MANTENER")
+
+        df["Senal"] = df.apply(_senal, axis=1)
+
+        capital = 10_000.0
+        posicion = 0.0
+        ops: list[dict] = []
+        hist: list[dict] = []
+
+        for i, (fecha, row) in enumerate(df.iterrows()):
+            precio = row["Close"]
+            if row["Senal"] == "COMPRAR" and posicion == 0:
+                posicion = capital / precio
+                capital = 0.0
+                ops.append({"fecha": fecha.strftime("%Y-%m-%d"), "tipo": "COMPRA", "precio": float(precio)})
+            elif row["Senal"] == "VENDER" and posicion > 0:
+                capital = posicion * precio
+                ops.append({"fecha": fecha.strftime("%Y-%m-%d"), "tipo": "VENTA",
+                             "precio": float(precio), "ganancia": float(capital - 10_000)})
+                posicion = 0.0
+            hist.append({"fecha": fecha.strftime("%Y-%m-%d"),
+                         "capital": float(posicion * precio if posicion > 0 else capital)})
+
+        if posicion > 0:
+            capital = posicion * float(df["Close"].iloc[-1])
+
+        caps = [h["capital"] for h in hist]
+        ret_pso = (caps[-1] - 10_000) / 10_000 * 100
+        rets_d  = pd.Series(caps).pct_change().dropna()
+        sharpe  = float((rets_d.mean() / rets_d.std()) * (252 ** 0.5)) if rets_d.std() != 0 else 0.0
+        cummax  = pd.Series(caps).cummax()
+        mdd     = float(((pd.Series(caps) - cummax) / cummax).min() * 100)
+        cerradas = [o for o in ops if "ganancia" in o]
+        win_rate = len([o for o in cerradas if o["ganancia"] > 0]) / len(cerradas) * 100 if cerradas else 0.0
+
+        pi = float(df["Close"].iloc[0])
+        pf = float(df["Close"].iloc[-1])
+        ret_bh = (pf - pi) / pi * 100
+        hist_bh = [{"fecha": df.index[i].strftime("%Y-%m-%d"),
+                    "capital": float(10_000 * df["Close"].iloc[i] / pi)}
+                   for i in range(len(df))]
+
+        return {
+            "ticker": ticker,
+            "periodo": {"inicio": df.index[0].strftime("%Y-%m-%d"), "fin": df.index[-1].strftime("%Y-%m-%d"), "dias": len(df)},
+            "estrategia_pso": {
+                "capital_final": caps[-1], "retorno_total": ret_pso,
+                "sharpe_ratio": sharpe, "max_drawdown": mdd,
+                "win_rate": win_rate, "num_operaciones": len(cerradas),
+                "historial_capital": hist,
+            },
+            "buy_hold": {"capital_final": 10_000 * (1 + ret_bh / 100), "retorno_total": ret_bh, "historial_capital": hist_bh},
+            "comparacion": {"diferencia": ret_pso - ret_bh, "ganador": "PSO" if caps[-1] > 10_000 * (1 + ret_bh / 100) else "Buy & Hold"},
+            "operaciones": ops,
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 
-def signal_card_class(senal):
-    senal = str(senal).upper()
-    if senal == "COMPRAR":
-        return "signal-card"
-    if senal == "VENDER":
-        return "signal-card-red"
-    return "signal-card-yellow"
+# ─────────────────────────────────────────────────────────────────────────────
+# HELPERS UI
+# ─────────────────────────────────────────────────────────────────────────────
+def _signal_css(senal: str) -> str:
+    s = str(senal).upper()
+    return "buy" if s == "COMPRAR" else ("sell" if s == "VENDER" else "hold")
 
 
-# -------------------------
-# SIDEBAR / CONSULTA
-# -------------------------
-st.sidebar.title("Consulta Langflow")
+def _pct(v) -> int:
+    try: return int(round(float(v) * 100))
+    except: return 0
 
-# Selector de vista
-vista = st.sidebar.radio(
-    "Vista",
-    ["Análisis en Vivo", "Backtesting"]
-)
 
-ticker = st.sidebar.selectbox(
-    "Selecciona ticker",
-    ["BVN", "SCCO"]
-)
+def _delta_color(v) -> str:
+    try: return "c-d-up" if float(v) >= 0 else "c-d-dn"
+    except: return "c-d-eq"
 
-if vista == "Análisis en Vivo":
-    modo_comparacion = st.sidebar.checkbox("Modo comparación (BVN vs SCCO)", value=False)
 
-    if st.sidebar.button("Analizar"):
-        # Pre-fetch histórico antes del flow para usar datos cacheados en el chart
-        with st.spinner("Precargando datos históricos..."):
-            tickers_a_precargar = ["BVN", "SCCO"] if modo_comparacion else [ticker]
-            for t in tickers_a_precargar:
-                obtener_historico_directo(t)
+def _fmt_precio(v, moneda="S/.") -> str:
+    if v is None: return "—"
+    return f"{moneda} {v:,.4f}" if float(v) < 10 else f"{moneda} {v:,.2f}"
 
-        with st.spinner("Ejecutando flujo multiagente en Langflow..."):
-            try:
-                if modo_comparacion:
-                    data_bvn = ejecutar_langflow("BVN")
-                    data_scco = ejecutar_langflow("SCCO")
-                    st.session_state["data_bvn"] = data_bvn
-                    st.session_state["data_scco"] = data_scco
-                    st.session_state["modo_comparacion"] = True
-                else:
-                    data_result = ejecutar_langflow(ticker)
-                    st.session_state["data"] = data_result
-                    st.session_state["modo_comparacion"] = False
 
-                st.sidebar.success("Análisis completado.")
-            except Exception as e:
-                st.sidebar.error("Error ejecutando Langflow.")
-                st.sidebar.exception(e)
+# ─────────────────────────────────────────────────────────────────────────────
+# SIDEBAR
+# ─────────────────────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.markdown("## Dashboard BVL")
+    st.markdown("Análisis multiagente del sector minero peruano")
+    st.divider()
 
-elif vista == "Backtesting":
-    periodo = st.sidebar.selectbox(
-        "Período de backtesting",
-        ["3 meses (90 días)", "6 meses (180 días)", "1 año (365 días)"]
+    ticker_label = st.selectbox(
+        "Empresa / Ticker",
+        list(TICKERS_BVL.keys()),
+        index=0,
     )
-    
-    dias_map = {
-        "3 meses (90 días)": 90,
-        "6 meses (180 días)": 180,
-        "1 año (365 días)": 365
-    }
-    
-    dias = dias_map[periodo]
-    
-    if st.sidebar.button("Ejecutar Backtest"):
-        with st.spinner(f"Ejecutando backtest de {dias} días..."):
-            try:
-                resultado = ejecutar_backtest(ticker, dias)
-                st.session_state["backtest_data"] = resultado
-                st.sidebar.success("Backtest completado.")
-            except Exception as e:
-                st.sidebar.error("Error ejecutando backtest.")
-                st.sidebar.exception(e)
+    ticker = TICKERS_BVL[ticker_label]
 
+    # Precio en tiempo real
+    with st.spinner(""):
+        rt = _fetch_bvl_precio_rt(ticker)
 
-# ========================
-# VISTA: BACKTESTING
-# ========================
-if vista == "Backtesting":
-    st.markdown(
-        """
-        <h1 style="color:white; font-size:28px;">
-            Backtesting — Validación de Rendimiento Histórico
-        </h1>
-        """,
-        unsafe_allow_html=True
-    )
-    
-    if "backtest_data" not in st.session_state:
-        st.info("Selecciona un ticker y período en la barra lateral, luego presiona 'Ejecutar Backtest'.")
-        st.stop()
-    
-    data_bt = st.session_state["backtest_data"]
-    
-    if "error" in data_bt:
-        st.error(f"Error: {data_bt['error']}")
-        st.stop()
-    
-    # Header
-    st.markdown(f"### {data_bt['ticker']} — {data_bt['periodo']['inicio']} al {data_bt['periodo']['fin']} ({data_bt['periodo']['dias']} días)")
-    
-    st.write("")
-    
-    # Métricas comparativas
-    col1, col2, col3 = st.columns(3)
-    
-    pso = data_bt['estrategia_pso']
-    bh = data_bt['buy_hold']
-    comp = data_bt['comparacion']
-    
-    with col1:
+    if rt and rt.get("precio"):
+        var = rt.get("variacion_pct", 0) or 0
+        var_cls = "up" if var >= 0 else "down"
+        var_str = f"{'▲' if var >= 0 else '▼'} {var:+.2f}%"
+        vol_str = f"Vol: {rt['volumen']:,}" if rt.get("volumen") else ""
+        moneda  = rt.get("moneda", "S/.")
+        precio_fmt = _fmt_precio(rt["precio"], moneda)
         st.markdown(f"""
-        <div class="card">
-            <div class="card-title">Estrategia PSO</div>
-            <div class="metric-big">{pso['retorno_total']:.2f}%</div>
-            <div class="metric-small">Retorno total</div>
+        <div class="rt-price-box">
+            <div class="rt-ticker">{ticker} · Tiempo Real</div>
+            <div class="rt-val">{precio_fmt}</div>
+            <div class="rt-change {var_cls}">{var_str}</div>
+            <div class="rt-vol">{vol_str}</div>
         </div>
         """, unsafe_allow_html=True)
-    
-    with col2:
-        st.markdown(f"""
-        <div class="card">
-            <div class="card-title">Buy & Hold</div>
-            <div class="metric-big">{bh['retorno_total']:.2f}%</div>
-            <div class="metric-small">Retorno total</div>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with col3:
-        ganador_color = "#19c39c" if comp['ganador'] == "PSO" else "#f0a92f"
-        st.markdown(f"""
-        <div class="card">
-            <div class="card-title">Ganador</div>
-            <div class="metric-big" style="color:{ganador_color};">{comp['ganador']}</div>
-            <div class="metric-small">Diferencia: {comp['diferencia_retorno']:.2f}%</div>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    st.write("")
-    
-    # Gráfico de curvas de capital
-    fig_bt = crear_grafico_backtest(data_bt)
-    if fig_bt:
-        st.plotly_chart(fig_bt, use_container_width=True)
-    
-    st.write("")
-    
-    # Métricas detalladas
-    st.markdown("### Métricas de Riesgo y Rendimiento")
-    
-    m1, m2, m3, m4 = st.columns(4)
-    
-    with m1:
-        st.markdown(f"""
-        <div class="card">
-            <div class="card-title">Sharpe Ratio</div>
-            <div class="metric-big">{pso['sharpe_ratio']:.2f}</div>
-            <div class="metric-small">Anualizado</div>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with m2:
-        st.markdown(f"""
-        <div class="card">
-            <div class="card-title">Max Drawdown</div>
-            <div class="metric-big">{pso['max_drawdown']:.2f}%</div>
-            <div class="metric-small">Pérdida máxima</div>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with m3:
-        st.markdown(f"""
-        <div class="card">
-            <div class="card-title">Win Rate</div>
-            <div class="metric-big">{pso['win_rate']:.1f}%</div>
-            <div class="metric-small">Operaciones ganadoras</div>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with m4:
-        st.markdown(f"""
-        <div class="card">
-            <div class="card-title">Operaciones</div>
-            <div class="metric-big">{pso['num_operaciones']}</div>
-            <div class="metric-small">Total ejecutadas</div>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    st.write("")
-    
-    # Tabla de operaciones
-    st.markdown("### Historial de Operaciones")
-    
-    ops = data_bt['operaciones']
-    if len(ops) > 0:
-        df_ops = pd.DataFrame(ops)
-        st.dataframe(df_ops, use_container_width=True)
     else:
-        st.info("No hubo operaciones en este período.")
-    
-    st.stop()
+        st.caption(f"Precio no disponible para {ticker}")
+
+    st.divider()
+    if st.button("Ejecutar análisis completo", type="primary", use_container_width=True):
+        with st.spinner("Cargando histórico..."):
+            _fetch_historico.clear()
+            hist_pre = _fetch_historico(ticker)
+        with st.spinner("Ejecutando agentes IA en LangFlow..."):
+            try:
+                result = ejecutar_langflow(ticker)
+                st.session_state["data"]   = result
+                st.session_state["ticker"] = ticker
+                st.success("Análisis completado")
+            except Exception as e:
+                st.error("Error ejecutando LangFlow")
+                st.exception(e)
+
+    st.caption(f"Agentes: Técnico · Commodities · Sentimiento · Riesgo · PSO")
 
 
-# ========================
-# RESTO DEL CÓDIGO ORIGINAL PARA "ANÁLISIS EN VIVO"
-# ========================
+# ─────────────────────────────────────────────────────────────────────────────
+# TABS PRINCIPALES
+# ─────────────────────────────────────────────────────────────────────────────
+tab_analisis, tab_comm, tab_noticias, tab_bt = st.tabs([
+    "📊 Análisis",
+    "🥇 Commodities",
+    "📰 Noticias",
+    "📈 Backtesting",
+])
 
-# MODO COMPARACIÓN
-if st.session_state.get("modo_comparacion", False):
-    st.markdown(
-        """
-        <h1 style="color:white; font-size:28px;">
-            Comparación BVN vs SCCO
-            <span class="live-badge">EN VIVO</span>
-        </h1>
-        """,
-        unsafe_allow_html=True
-    )
-    
-    data_bvn = st.session_state.get("data_bvn", {})
-    data_scco = st.session_state.get("data_scco", {})
-    
-    col1, col2 = st.columns(2)
-    
-    for col, data, ticker_name in [(col1, data_bvn, "BVN"), (col2, data_scco, "SCCO")]:
-        with col:
-            st.markdown(f"### {ticker_name}")
-            
-            senal_final = data.get("senal_final", "MANTENER")
-            score_final = float(data.get("score_final", 0))
-            confianza_final = float(data.get("confianza_final", 0))
-            
+
+# ═══════════════════════════════════════════════════════
+# TAB 1 — ANÁLISIS
+# ═══════════════════════════════════════════════════════
+with tab_analisis:
+    data = st.session_state.get("data")
+    ticker_data = st.session_state.get("ticker", ticker)
+
+    if not data:
+        st.markdown("### Bienvenido al Dashboard BVL")
+        c1, c2, c3 = st.columns(3)
+        c1.info("**1. Selecciona** una empresa en el panel izquierdo")
+        c2.info("**2. Presiona** 'Ejecutar análisis completo'")
+        c3.info("**3. Los agentes IA** analizarán precio, commodities, noticias y riesgo")
+        st.markdown("---")
+        st.markdown("**Empresas disponibles:** " + ", ".join(TICKERS_BVL.values()))
+    else:
+        senal_final    = data.get("senal_final", "MANTENER")
+        score_final    = float(data.get("score_final", 0))
+        confianza_final = float(data.get("confianza_final", 0))
+        pesos          = data.get("pesos_utilizados", {})
+        detalle        = data.get("detalle_agentes", {})
+        senales_ag     = data.get("senales_agentes", {})
+        confianzas_ag  = data.get("confianzas_agentes", {})
+        factores       = data.get("factores_clave", [])
+        limitaciones   = data.get("limitaciones", [])
+        nivel_conf     = data.get("dashboard", {}).get("nivel_confianza", "—")
+
+        # ── Fila 1: Signal + métricas ─────────────────────────────────────────
+        col_sig, col_mets = st.columns([1, 2])
+
+        with col_sig:
+            sc = _signal_css(senal_final)
+            rt_actual = _fetch_bvl_precio_rt(ticker_data)
+            precio_str = ""
+            if rt_actual and rt_actual.get("precio"):
+                var = rt_actual.get("variacion_pct", 0) or 0
+                precio_str = f"{_fmt_precio(rt_actual['precio'], rt_actual.get('moneda','S/.'))}  {'▲' if var >= 0 else '▼'} {var:+.2f}%"
             st.markdown(f"""
-            <div class="{signal_card_class(senal_final)}" style="margin-bottom:20px;">
-                <div class="signal-title">Señal</div>
-                <div class="signal-main">{senal_final}</div>
-                <div style="font-size:18px;">Score: {score_final:.4f} | Confianza: {pct(confianza_final)}%</div>
+            <div class="signal-banner {sc}">
+                <div class="sig-label">Señal consolidada · {ticker_data}</div>
+                <div class="sig-main">{senal_final}</div>
+                <div class="sig-sub">Score PSO: {score_final:.4f} · Confianza: {_pct(confianza_final)}% ({nivel_conf})</div>
+                {'<div class="sig-sub" style="margin-top:6px;font-size:14px;">'+precio_str+'</div>' if precio_str else ''}
             </div>
             """, unsafe_allow_html=True)
-            
-            pesos = data.get("pesos_utilizados", {})
-            st.markdown("**Pesos PSO:**")
-            st.write(f"Técnico: {pct(pesos.get('tecnico', 0))}% | Commodities: {pct(pesos.get('commodities', 0))}%")
-            st.write(f"Sentimiento: {pct(pesos.get('sentimiento', 0))}% | Riesgo: {pct(pesos.get('riesgo', 0))}%")
-    
-    st.stop()
 
-# MODO NORMAL
-if "data" not in st.session_state:
-    st.markdown(
-        """
-        <h1 style="color:white; font-size:28px;">
-            Soporte de decisión — acciones mineras BVL
-            <span class="live-badge">EN VIVO</span>
-        </h1>
-        """,
-        unsafe_allow_html=True
-    )
-    st.info("Selecciona un ticker en la barra lateral y presiona Analizar.")
-    st.stop()
+        with col_mets:
+            ag_names = {"tecnico": "Técnico", "commodities": "Commodities", "sentimiento": "Sentimiento", "riesgo": "Riesgo"}
+            for key, name in ag_names.items():
+                senal  = senales_ag.get(key, "MANTENER")
+                conf   = _pct(confianzas_ag.get(key, 0))
+                sc_ag  = _signal_css(senal)
+                resumen = detalle.get(key, {}).get("resumen", "")
+                resumen_html = (f'<div class="ag-desc">{resumen[:160]}</div>' if resumen else "")
+                st.markdown(f"""
+                <div class="agent-card">
+                    <div class="ag-name">{name}</div>
+                    <div class="ag-signal {sc_ag}">{senal}</div>
+                    <div class="ag-conf">Confianza: {conf}%</div>
+                    <div class="prog-wrap"><div class="prog-fill {sc_ag}" style="width:{max(conf,2)}%;"></div></div>
+                    {resumen_html}
+                </div>
+                """, unsafe_allow_html=True)
 
-data = st.session_state["data"]
+        # ── Fila 2: Gráfico técnico ────────────────────────────────────────────
+        st.markdown("---")
+        st.markdown("#### Análisis Técnico Visual")
 
-# HEADER
-st.markdown(
-    """
-    <h1 style="color:white; font-size:28px;">
-        Soporte de decisión — acciones mineras BVL
-        <span class="live-badge">EN VIVO</span>
-    </h1>
-    """,
-    unsafe_allow_html=True
-)
+        with st.spinner("Cargando datos históricos..."):
+            historico = _fetch_historico(ticker_data)
 
-tickers_display = ["BVN", "SCCO"]
-ticker_actual = data.get("ticker", ticker)
+        if historico and len(historico) >= 10:
+            df_h = pd.DataFrame(historico)
+            # Detectar iliquidez: si >70% de los precios son iguales, el gráfico no aporta
+            if df_h["close"].nunique() <= max(3, len(df_h) * 0.3):
+                st.warning(
+                    f"⚠️ **{ticker_data} es un activo de muy baja liquidez** — "
+                    "los precios históricos no varían significativamente. "
+                    "Los indicadores técnicos (RSI, MACD, SMA) no son fiables para este ticker."
+                )
+            st.plotly_chart(_grafico_tecnico(historico, ticker_data), use_container_width=True)
+        else:
+            st.warning("Sin datos históricos suficientes para graficar.")
 
-html_tickers = ""
-for t in tickers_display:
-    css_class = "ticker-button-active" if t == ticker_actual else "ticker-button"
-    html_tickers += f'<span class="{css_class}">{t}</span>'
+        # ── Fila 3: Factores + Pesos PSO ─────────────────────────────────────
+        st.markdown("---")
+        col_fact, col_pesos = st.columns([3, 2])
 
-st.markdown(html_tickers, unsafe_allow_html=True)
+        with col_fact:
+            st.markdown("#### Por qué esta señal")
+            if factores:
+                items_html = "".join(f"<li>{f}</li>" for f in factores)
+                st.markdown(f'<div class="reason-card"><ul style="padding-left:18px;margin:0">{items_html}</ul></div>',
+                            unsafe_allow_html=True)
+            else:
+                st.info("Sin factores clave disponibles.")
 
-st.write("")
+        with col_pesos:
+            st.markdown("#### Pesos PSO")
+            peso_labels = {"tecnico": "Técnico", "commodities": "Commodities",
+                           "sentimiento": "Sentimiento", "riesgo": "Riesgo"}
+            for key, name in peso_labels.items():
+                val = _pct(pesos.get(key, 0))
+                st.markdown(f"""
+                <div class="peso-bar">
+                    <span class="p-name">{name}</span>
+                    <span class="p-pct">{val}%</span>
+                    <div style="clear:both"></div>
+                    <div class="prog-wrap" style="margin-top:8px;">
+                        <div class="prog-fill buy" style="width:{max(val,2)}%;"></div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
 
-# VALORES SEGUROS
-dashboard = data.get("dashboard", {})
-senal_final = data.get("senal_final", "MANTENER")
-score_final = float(data.get("score_final", 0))
-confianza_final = float(data.get("confianza_final", 0))
-nivel_confianza = dashboard.get("nivel_confianza", "baja")
+        # ── Fila 4: Limitaciones ─────────────────────────────────────────────
+        if limitaciones:
+            st.markdown("---")
+            with st.expander("Limitaciones del análisis"):
+                for lim in limitaciones:
+                    st.warning(lim)
 
-# MÉTRICAS SUPERIORES
-col1, col2, col3 = st.columns(3)
+        with st.expander("Ver JSON completo del análisis"):
+            st.json(data)
 
-with col1:
-    st.markdown(f"""
-    <div class="card">
-        <div class="card-title">Ticker analizado</div>
-        <div class="metric-big">{ticker_actual}</div>
-        <div class="metric-small">Acción minera BVL</div>
-    </div>
-    """, unsafe_allow_html=True)
 
-with col2:
-    st.markdown(f"""
-    <div class="card">
-        <div class="card-title">Score final PSO</div>
-        <div class="metric-big">{score_final:.4f}</div>
-        <div class="metric-small">Rango: -1 a 1</div>
-    </div>
-    """, unsafe_allow_html=True)
+# ═══════════════════════════════════════════════════════
+# TAB 2 — COMMODITIES
+# ═══════════════════════════════════════════════════════
+with tab_comm:
+    st.markdown("#### Precios en Tiempo Real — Metales Industriales")
+    st.caption("Fuente primaria: yfinance (mercado global) · Actualización cada 5 min")
 
-with col3:
-    st.markdown(f"""
-    <div class="card">
-        <div class="card-title">Confianza final</div>
-        <div class="metric-big">{pct(confianza_final)}%</div>
-        <div class="metric-small">Nivel: {nivel_confianza}</div>
-    </div>
-    """, unsafe_allow_html=True)
+    with st.spinner("Obteniendo precios de commodities..."):
+        comm = _fetch_commodities()
 
-st.write("")
-
-# GRÁFICO DE PRECIO E INDICADORES
-st.markdown("<h2 style='color:white;'>Análisis Técnico Visual</h2>", unsafe_allow_html=True)
-
-detalle_agentes = data.get("detalle_agentes", {})
-tecnico = detalle_agentes.get("tecnico", {})
-
-# Siempre obtener historico directamente: BVL primero, Alpha Vantage como fallback.
-# No dependemos del LangFlow response porque el LLM trunca arrays grandes.
-with st.spinner("Cargando datos históricos..."):
-    historico = obtener_historico_directo(ticker_actual)
-
-if historico and len(historico) > 0:
-    fig = crear_grafico_precio_indicadores(historico, ticker_actual)
-    if fig:
-        st.plotly_chart(fig, use_container_width=True)
+    if "error" in comm:
+        st.error(f"Error al obtener datos de commodities: {comm['error']}")
+        st.info("Verifica que `yfinance` esté instalado en el contenedor.")
     else:
-        st.warning("No se pudo generar el gráfico con los datos disponibles.")
-else:
-    st.info("No hay datos históricos disponibles para graficar. Verifica tu API Key de Alpha Vantage.")
+        c1, c2, c3 = st.columns(3)
+        metal_cols  = [c1, c2, c3]
+        metal_names = ["Oro", "Plata", "Cobre"]
+        metal_colors = ["#fbbf24", "#94a3b8", "#f97316"]
+        metal_rel   = {
+            "Oro":   "Relevante para **BVN** (Buenaventura), **PODERC1** (Poderosa)",
+            "Plata": "Relevante para **MINSURI1** (Minsur), **VOLCABC1** (Volcan), **BROCALC1** (El Brocal)",
+            "Cobre": "Relevante para **SCCO** (Southern Copper), **CVERDEC1** (Cerro Verde), **NEXAPEC1** (Nexa)",
+        }
 
-st.write("")
+        for col, nombre, color in zip(metal_cols, metal_names, metal_colors):
+            with col:
+                d = comm.get(nombre, {})
+                if "error" in d:
+                    st.error(f"{nombre}: {d['error']}")
+                    continue
 
-# CUERPO PRINCIPAL
-left, right = st.columns([1, 1])
+                precio = d["precio"]
+                cam    = d["cambio_dia"]
+                tend   = d["tend_5d"]
+                unit   = d["unit"]
+                label  = d["label"]
+                src    = d.get("fuente", "?")
 
-with left:
-    st.markdown('<div class="card" style="min-height:500px;"><div class="card-title" style="font-size:20px;">Estado de los agentes</div>', unsafe_allow_html=True)
-    
-    nombres = {
-        "tecnico": "Agente técnico",
-        "commodities": "Agente commodities",
-        "sentimiento": "Agente de sentimiento",
-        "riesgo": "Agente de riesgo"
-    }
+                cam_cls  = "c-d-up" if cam  >= 0 else "c-d-dn"
+                tend_cls = "c-d-up" if tend >= 0 else "c-d-dn"
+                cam_sym  = "▲" if cam  >= 0 else "▼"
+                ten_sym  = "▲" if tend >= 0 else "▼"
 
-    senales_agentes = data.get("senales_agentes", {})
-    confianzas_agentes = data.get("confianzas_agentes", {})
+                st.markdown(f"""
+                <div class="comm-card">
+                    <div class="c-name">{nombre}</div>
+                    <div class="c-price">${precio:,.2f}</div>
+                    <div class="c-label">USD/{unit} · {label}</div>
+                    <div style="margin-top:8px;">
+                        <span class="{cam_cls}">{cam_sym} {cam:+.2f}% hoy</span>
+                        &nbsp;&nbsp;
+                        <span class="{tend_cls}" style="font-size:12px;">{ten_sym} {tend:+.2f}% (5d)</span>
+                    </div>
+                    <div class="c-src">Fuente: {src}</div>
+                </div>
+                """, unsafe_allow_html=True)
 
-    for key, name in nombres.items():
-        senal = senales_agentes.get(key, "MANTENER")
-        confianza = float(confianzas_agentes.get(key, 0))
-        confianza_pct = pct(confianza)
-        width = max(confianza_pct, 2)
+                if d.get("closes") and len(d["closes"]) >= 4:
+                    st.plotly_chart(
+                        _grafico_sparkline(d["closes"], d["dates"], color),
+                        use_container_width=True,
+                    )
 
-        row_html = f'''
-        <div class="agent-row">
-            <div class="agent-name">{name}</div>
-            <div class="{badge_class(senal)}">{senal}</div>
-            <div class="progress-bg">
-                <div class="progress-fill" style="width:{width}%;"></div>
+                st.caption(metal_rel[nombre])
+
+        st.markdown("---")
+        st.markdown("#### Relevancia por empresa BVL")
+        rel_data = {
+            "Empresa":   ["BVN (Buenaventura)", "SCCO (Southern Copper)", "CVERDEC1 (Cerro Verde)",
+                          "MINSURI1 (Minsur)", "VOLCABC1 (Volcan)", "BROCALC1 (El Brocal)", "NEXAPEC1 (Nexa)"],
+            "Commodity principal": ["Oro", "Cobre", "Cobre", "Estaño/Plata", "Zinc/Plata", "Polimetálico", "Zinc/Plata"],
+            "Correlación esperada": ["Alta con Oro", "Alta con Cobre", "Alta con Cobre",
+                                     "Media con Plata", "Media con Plata", "Media mixta", "Media con Zinc"],
+        }
+        st.dataframe(pd.DataFrame(rel_data), use_container_width=True, hide_index=True)
+
+
+# ═══════════════════════════════════════════════════════
+# TAB 3 — NOTICIAS
+# ═══════════════════════════════════════════════════════
+with tab_noticias:
+    st.markdown(f"#### Noticias para **{ticker}**")
+    st.caption("Alpha Vantage NEWS_SENTIMENT (con scores) + Google News RSS (español)")
+
+    with st.spinner("Buscando noticias..."):
+        noticias = _fetch_noticias(ticker)
+
+    av_arts  = noticias.get("av", [])
+    rss_arts = noticias.get("rss", [])
+
+    # ── Sentimiento resumido ──────────────────────────────────────────────────
+    if av_arts:
+        alc = len([a for a in av_arts if a["score"] > 0.15])
+        baj = len([a for a in av_arts if a["score"] < -0.15])
+        neu = len(av_arts) - alc - baj
+        total = len(av_arts)
+        tend_color = "#22c55e" if alc > baj else ("#ef4444" if baj > alc else "#eab308")
+        tend_label = "ALCISTA" if alc > baj else ("BAJISTA" if baj > alc else "NEUTRAL")
+
+        s1, s2, s3, s4 = st.columns(4)
+        s1.metric("Noticias analizadas", total)
+        s2.metric("Alcistas", alc, delta=None)
+        s3.metric("Bajistas", baj, delta=None)
+        s4.metric("Tendencia", tend_label)
+
+        st.markdown("---")
+
+    # ── Columnas: AV | RSS ────────────────────────────────────────────────────
+    col_av, col_rss = st.columns(2)
+
+    with col_av:
+        st.markdown("##### Alpha Vantage — Análisis financiero")
+        if not av_arts:
+            st.info("Sin noticias de Alpha Vantage para este ticker. "
+                    "Puede ser por límite de consultas (25/día en plan gratuito).")
+        for art in av_arts[:8]:
+            score = art["score"]
+            badge_cls = "pos" if score > 0.15 else ("neg" if score < -0.15 else "neu")
+            score_str = f"{score:+.3f}"
+            url_html  = f'<a href="{art["url"]}" target="_blank" style="color:#60a5fa;font-size:11px;">Ver artículo ↗</a>' if art.get("url") else ""
+            st.markdown(f"""
+            <div class="news-card">
+                <div class="n-title">
+                    {art['titulo']}
+                    <span class="n-badge {badge_cls}">{art['label']} {score_str}</span>
+                </div>
+                <div class="n-meta">{art['fecha']} · {art['fuente']}</div>
+                <div class="n-desc">{art['resumen']}</div>
+                <div style="margin-top:6px;">{url_html}</div>
             </div>
-            <div style="font-size:20px;">{confianza_pct}%</div>
-        </div>
-        '''
-        st.markdown(row_html, unsafe_allow_html=True)
+            """, unsafe_allow_html=True)
 
-    st.markdown('''
-    <div class="agent-row">
-        <div class="agent-name">Agente swarm<br>(PSO)</div>
-        <div class="badge-buy">calculado</div>
-        <div class="progress-bg">
-            <div class="progress-fill" style="width:100%;"></div>
-        </div>
-        <div style="font-size:20px;">✓</div>
-    </div>
-    </div>
-    ''', unsafe_allow_html=True)
-
-with right:
-    st.markdown(f"""
-    <div class="{signal_card_class(senal_final)}">
-        <div class="signal-title">Señal consolidada</div>
-        <div class="signal-main">{senal_final}</div>
-        <div style="font-size:22px;">Confianza: {pct(confianza_final)}%</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    st.write("")
-
-    factores_html = ""
-    for f in data.get("factores_clave", []):
-        factores_html += f"<p style='font-size:20px; margin:10px 0;'>• {f}</p>"
-
-    if not factores_html:
-        factores_html = "<p style='font-size:20px;'>Sin factores clave disponibles.</p>"
-
-    st.markdown(f"""
-    <div class="reason-card">
-        <h3>¿Por qué esta señal?</h3>
-        {factores_html}
-    </div>
-    """, unsafe_allow_html=True)
-
-st.write("")
-
-# PESOS PSO
-st.markdown("<h2 style='color:white;'>Pesos optimizados por PSO</h2>", unsafe_allow_html=True)
-
-p1, p2, p3, p4 = st.columns(4)
-
-pesos = data.get("pesos_utilizados", {
-    "tecnico": 0,
-    "commodities": 0,
-    "sentimiento": 0,
-    "riesgo": 0
-})
-
-for col, name, value in zip(
-    [p1, p2, p3, p4],
-    ["Técnico", "Commodities", "Sentimiento", "Riesgo"],
-    [
-        pesos.get("tecnico", 0),
-        pesos.get("commodities", 0),
-        pesos.get("sentimiento", 0),
-        pesos.get("riesgo", 0)
-    ]
-):
-    with col:
-        st.markdown(f"""
-        <div class="card">
-            <div class="card-title">{name}</div>
-            <div class="metric-big">{pct(value)}%</div>
-            <div class="metric-small">peso PSO</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-# DETALLE POR AGENTE
-st.markdown("<h2 style='color:white;'>Detalle por agente</h2>", unsafe_allow_html=True)
-
-detalle = data.get("detalle_agentes", {})
-
-d1, d2 = st.columns(2)
-
-for idx, key in enumerate(["tecnico", "commodities", "sentimiento", "riesgo"]):
-    col = d1 if idx % 2 == 0 else d2
-    item = detalle.get(key, {})
-    senal_agent = item.get("senal", senales_agentes.get(key, "MANTENER"))
-    score_agent = item.get("score", data.get("scores_agentes", {}).get(key, 0))
-    conf_agent = item.get("confianza", confianzas_agentes.get(key, 0))
-    resumen_agent = item.get("resumen", "Sin resumen disponible.")
-    
-    with col:
-        card_html = f'''
-        <div class="card" style="min-height:190px; margin-bottom:16px;">
-            <div class="card-title">{nombres.get(key, key)}</div>
-            <div style="font-size:22px; font-weight:700; margin-top:10px;">
-                {senal_agent}
+    with col_rss:
+        st.markdown("##### Google News — Noticias en español")
+        if not rss_arts:
+            st.info("Sin resultados en Google News RSS. "
+                    "Verifica que `feedparser` esté instalado en el contenedor.")
+        for art in rss_arts[:8]:
+            url_html = (f'<a href="{art["link"]}" target="_blank" style="color:#60a5fa;font-size:11px;">Leer noticia ↗</a>'
+                        if art.get("link") else "")
+            st.markdown(f"""
+            <div class="news-card">
+                <div class="n-title">{art['titulo']}</div>
+                <div class="n-meta">{art['publicado']}</div>
+                <div class="n-desc">{art['resumen']}</div>
+                <div style="margin-top:6px;">{url_html}</div>
             </div>
-            <div class="metric-small">
-                Score: {score_agent} · Confianza: {pct(conf_agent)}%
-            </div>
-            <p style="color:#d0d0cc; font-size:16px;">
-                {resumen_agent}
-            </p>
-        </div>
-        '''
-        st.markdown(card_html, unsafe_allow_html=True)
+            """, unsafe_allow_html=True)
 
-# LIMITACIONES
-st.markdown("<h2 style='color:white;'>Limitaciones</h2>", unsafe_allow_html=True)
 
-limitaciones = data.get("limitaciones", ["Sin limitaciones relevantes"])
+# ═══════════════════════════════════════════════════════
+# TAB 4 — BACKTESTING
+# ═══════════════════════════════════════════════════════
+with tab_bt:
+    st.markdown("#### Backtesting — Validación Histórica de Estrategia")
 
-for item in limitaciones:
-    st.warning(item)
+    bc1, bc2, bc3 = st.columns([1, 1, 2])
+    with bc1:
+        periodo = st.selectbox("Período", ["3 meses (90 días)", "6 meses (180 días)", "1 año (365 días)"], key="bt_periodo")
+    with bc2:
+        st.markdown("<br>", unsafe_allow_html=True)
+        run_bt = st.button("Ejecutar Backtest", type="primary", key="btn_bt")
+    with bc3:
+        st.caption("Compara la estrategia PSO (basada en RSI + MACD + SMA) contra Buy & Hold simple.")
 
-# DEBUG OPCIONAL
-with st.expander("Ver JSON completo recibido"):
-    st.json(data)
+    dias_map = {"3 meses (90 días)": 90, "6 meses (180 días)": 180, "1 año (365 días)": 365}
+    dias = dias_map[periodo]
+
+    if run_bt:
+        with st.spinner(f"Ejecutando backtest de {dias} días para {ticker}..."):
+            resultado = _ejecutar_backtest(ticker, dias)
+        st.session_state["bt_data"]   = resultado
+        st.session_state["bt_ticker"] = ticker
+
+    bt = st.session_state.get("bt_data")
+    if not bt:
+        st.info("Selecciona un período y presiona 'Ejecutar Backtest'.")
+    elif "error" in bt:
+        st.error(f"Error: {bt['error']}")
+    else:
+        pso  = bt["estrategia_pso"]
+        bh   = bt["buy_hold"]
+        comp = bt["comparacion"]
+
+        st.markdown(f"**{bt['ticker']}** · {bt['periodo']['inicio']} → {bt['periodo']['fin']} ({bt['periodo']['dias']} días)")
+        st.markdown("---")
+
+        # Métricas comparativas
+        m1, m2, m3 = st.columns(3)
+        ret_color_pso = "#22c55e" if pso["retorno_total"] >= 0 else "#ef4444"
+        ret_color_bh  = "#22c55e" if bh["retorno_total"]  >= 0 else "#ef4444"
+        ganador_color = "#22c55e" if comp["ganador"] == "PSO" else "#fbbf24"
+
+        m1.markdown(f"""<div class="metric-card">
+            <div class="label">Estrategia PSO</div>
+            <div class="value" style="color:{ret_color_pso};">{pso['retorno_total']:.2f}%</div>
+            <div class="sub">Capital final: ${pso['capital_final']:,.0f}</div>
+        </div>""", unsafe_allow_html=True)
+
+        m2.markdown(f"""<div class="metric-card">
+            <div class="label">Buy & Hold</div>
+            <div class="value" style="color:{ret_color_bh};">{bh['retorno_total']:.2f}%</div>
+            <div class="sub">Capital final: ${bh['capital_final']:,.0f}</div>
+        </div>""", unsafe_allow_html=True)
+
+        m3.markdown(f"""<div class="metric-card">
+            <div class="label">Ganador</div>
+            <div class="value" style="color:{ganador_color};">{comp['ganador']}</div>
+            <div class="sub">Diferencia: {comp['diferencia']:+.2f}%</div>
+        </div>""", unsafe_allow_html=True)
+
+        st.write("")
+        st.plotly_chart(_grafico_backtest(bt), use_container_width=True)
+
+        st.markdown("---")
+        st.markdown("#### Métricas de Riesgo")
+        r1, r2, r3, r4 = st.columns(4)
+        r1.markdown(f"""<div class="metric-card">
+            <div class="label">Sharpe Ratio</div>
+            <div class="value">{pso['sharpe_ratio']:.2f}</div>
+            <div class="sub">Anualizado</div>
+        </div>""", unsafe_allow_html=True)
+        r2.markdown(f"""<div class="metric-card">
+            <div class="label">Max Drawdown</div>
+            <div class="value" style="color:#ef4444;">{pso['max_drawdown']:.2f}%</div>
+            <div class="sub">Pérdida máxima</div>
+        </div>""", unsafe_allow_html=True)
+        r3.markdown(f"""<div class="metric-card">
+            <div class="label">Win Rate</div>
+            <div class="value">{pso['win_rate']:.1f}%</div>
+            <div class="sub">Operaciones ganadoras</div>
+        </div>""", unsafe_allow_html=True)
+        r4.markdown(f"""<div class="metric-card">
+            <div class="label">Operaciones</div>
+            <div class="value">{pso['num_operaciones']}</div>
+            <div class="sub">Cerradas en el período</div>
+        </div>""", unsafe_allow_html=True)
+
+        if bt["operaciones"]:
+            st.markdown("---")
+            with st.expander("Historial de operaciones"):
+                df_ops = pd.DataFrame(bt["operaciones"])
+                st.dataframe(df_ops, use_container_width=True, hide_index=True)

@@ -9,8 +9,11 @@ services:
       - PORT=7860
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
       - LANGFLOW_AUTO_LOGIN=true
+      - LANGFLOW_SKIP_AUTH_AUTO_LOGIN=true
       - LANGFLOW_SUPERUSER=admin
       - LANGFLOW_SUPERUSER_PASSWORD=admin1234
+    volumes:
+      - langflow_data:/root/.langflow
     restart: unless-stopped
     networks:
       - tunnel-net
@@ -45,3 +48,6 @@ services:
 networks:
   tunnel-net:
     driver: bridge
+
+volumes:
+  langflow_data:

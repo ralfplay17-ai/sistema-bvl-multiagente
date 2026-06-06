@@ -94,6 +94,37 @@ data = flows_r.json()
 flow_list = data if isinstance(data, list) else data.get("items", data.get("flows", []))
 print(f"[start] {len(flow_list)} flows encontrados")
 
+# Importar sistema_bvl.json si el flow no existe en la base de datos
+import json as _json
+
+FLOW_FILE = "/app/sistema_bvl.json"
+flow_names = [f.get("name", "").lower() for f in flow_list]
+bvl_exists = any("sistema" in n or "bvl" in n for n in flow_names)
+
+if not bvl_exists and os.path.exists(FLOW_FILE):
+    print("[start] Flow 'sistema_bvl' no encontrado, importando desde sistema_bvl.json...")
+    try:
+        with open(FLOW_FILE, encoding="utf-8") as fp:
+            flow_json = _json.load(fp)
+        r_import = requests.post(
+            f"{BASE}/api/v1/flows/",
+            json=flow_json,
+            headers=headers,
+            timeout=30,
+        )
+        if r_import.ok:
+            imported = r_import.json()
+            print(f"[start] Flow importado: '{imported.get('name')}' (id={imported.get('id')})")
+            flow_list.append(imported)
+        else:
+            print(f"[start] Error importando flow: {r_import.status_code} {r_import.text[:200]}")
+    except Exception as e:
+        print(f"[start] Excepcion al importar flow: {e}")
+elif bvl_exists:
+    print("[start] Flow 'sistema_bvl' ya existe en la base de datos, saltando importacion.")
+else:
+    print(f"[start] {FLOW_FILE} no encontrado en el contenedor.")
+
 # Inyectar DeepSeek key en cada flow
 updated_total = 0
 for flow_meta in flow_list:

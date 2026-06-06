@@ -6,7 +6,9 @@ RUN pip install --no-cache-dir \
     pandas \
     numpy \
     scipy \
-    requests
+    requests \
+    yfinance \
+    feedparser
 
 RUN mkdir -p /app/flows /app/data_bvl/data
 
